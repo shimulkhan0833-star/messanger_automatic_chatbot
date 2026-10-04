@@ -1,0 +1,93 @@
+Customer sends a message
+        ↓
+Meta sends it to your server through a webhook
+        ↓
+Your bot checks the message and conversation history
+        ↓
+Find an answer from FAQs, business data, or AI
+        ↓
+Send the reply through Messenger’s Send API
+        ↓
+Save the conversation for future replies
+
+A webhook is a public HTTPS endpoint that receives incoming messages from Meta.
+
+FILES AND THEIR WORK
+
+main.py
+Creates the FastAPI app, defines webhook and health routes, and starts/stops resources.
+
+techrock/config.py
+Loads environment variables from the root .env file and defines the project root path.
+
+techrock/db/database.py
+Creates the MySQL database and missing tables; manages the SQLAlchemy engine and sessions.
+
+techrock/db/models.py
+Defines the jobs and history database tables using SQLAlchemy ORM models.
+
+techrock/db/storage.py
+Saves incoming messages, selects queued jobs, stores replies/history, and manages retry status.
+
+techrock/services/chatbot.py
+Uses LangChain and Groq to generate replies from knowledge.txt and conversation history.
+
+techrock/services/messenger.py
+Sends text replies to Messenger users through Meta's API.
+
+techrock/services/worker.py
+Processes queued messages, generates/sends replies, retries failures, and expires old messages.
+
+techrock/__init__.py, techrock/db/__init__.py, techrock/services/__init__.py
+Mark these folders as Python packages so their modules can be imported.
+
+tests/test_webhook.py
+Tests webhook verification, signatures, duplicate protection, ignored events, and reply processing.
+
+tests/__init__.py
+Marks the tests folder as a package for test discovery.
+
+knowledge.txt
+Stores verified information about The Tech Rock for the chatbot's answers.
+
+.env
+Stores actual API keys, Meta settings, and MySQL credentials; keep it private.
+
+.env.example
+Provides configuration variable names and example defaults without real secrets.
+
+requirements.txt
+Lists the Python dependencies needed to run the project.
+
+.gitignore
+Prevents secrets, virtual environments, caches, and local data from being tracked by Git.
+
+README.md
+Explains installation, configuration, running the app, testing, and current limitations.
+
+workflow.txt
+Describes the message workflow and each project's file responsibilities.
+
+****************************************************************************************
+
+| File             | Function                   | Purpose |
+|---|---|---|
+| `database.py` | `Database.__init__()` | Creates database/tables, engine, and sessions. |
+| `database.py` | `close()` | Closes pooled database connections. |
+| `storage.py` | `Store.__init__()` | Connects storage to the database setup. |
+| `storage.py` | `enqueue()` | Saves incoming messages; ignores duplicates. |
+| `storage.py` | `next_job()` | Gets the next message ready to process. |
+| `storage.py` | `history()` | Loads recent conversation messages. |
+| `storage.py` | `save_reply()` | Saves the generated reply for retries. |
+| `storage.py` | `complete()` | Marks the job done and saves conversation history. |
+| `storage.py` | `expire()` | Stops processing an old message. |
+| `storage.py` | `fail()` | Schedules retries or marks the job failed. |
+| `storage.py` | `close()` | Calls database cleanup. |
+| `chatbot.py` | `generate_reply()` | Generates a Groq reply using knowledge and history. |
+| `messenger.py` | `send_reply()` | Sends the reply through Meta’s API. |
+| `worker.py` | `worker()` | Processes queued messages and handles retries. |
+| `main.py` | `create_app()` | Builds the FastAPI app and routes. |
+| `main.py` | `lifespan()` | Starts and stops app resources. |
+| `main.py` | `health()` | Reports missing configuration. |
+| `main.py` | `verify()` | Verifies the webhook with Meta. |
+| `main.py` | `receive()` | Validates and queues incoming messages. |
