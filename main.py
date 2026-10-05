@@ -15,6 +15,7 @@ import techrock.config
 from techrock.db.storage import Store
 from techrock.services.worker import worker
 from techrock.services.handoff import requests_person
+from techrock.services.media import extract_attachments
 
 
 # Build the FastAPI application, register its routes, and configure startup/shutdown handling.
@@ -105,8 +106,10 @@ def create_app(store_factory=None, run_worker=True):
                         str(event.get('recipient', {}).get('id')) != page):
                         continue
                     mid, text = message.get('mid'), message.get('text')
-                    if isinstance(mid, str) and isinstance(text, str) and text.strip():
-                        events.append(('message', mid, str(sender), text, received))
+                    attachments = extract_attachments(message.get('attachments', []))
+                    if isinstance(mid, str) and ((isinstance(text, str) and text.strip()) or attachments):
+                        text = text if isinstance(text, str) and text.strip() else ''
+                        events.append(('message', mid, str(sender), text, received, attachments))
         except (ValueError, TypeError, AttributeError):
             raise HTTPException(400, 'Invalid event payload') from None
         for event in events:
@@ -114,8 +117,11 @@ def create_app(store_factory=None, run_worker=True):
                 if event[0] == 'control':
                     await asyncio.to_thread(request.app.state.store.set_mode, *event[1:])
                 else:
-                    _, mid, sender, text, received = event
-                    await asyncio.to_thread(request.app.state.store.enqueue, mid, sender, text, received)
+                    _, mid, sender, text, received, attachments = event
+                    if attachments:
+                        await asyncio.to_thread(request.app.state.store.enqueue, mid, sender, text, received, attachments)
+                    else:
+                        await asyncio.to_thread(request.app.state.store.enqueue, mid, sender, text, received)
                     if requests_person(text):
                         await asyncio.to_thread(request.app.state.store.set_mode, sender, 'manual',
                                                 'handoff:' + mid, received)

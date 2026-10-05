@@ -36,3 +36,10 @@ class History(Base):
     sender: Mapped[str] = mapped_column(String(128))
     role: Mapped[str] = mapped_column(String(16))
     content: Mapped[str] = mapped_column(Text)
+
+class JobMedia(Base):
+    """Separate table keeps existing jobs installations compatible without ALTER."""
+    __tablename__ = 'job_media'
+    mid: Mapped[str] = mapped_column(VARCHAR(512, charset='ascii', collation='ascii_bin'), primary_key=True)
+    attachments: Mapped[str] = mapped_column(Text)
+    prepared_text: Mapped[str | None] = mapped_column(Text)

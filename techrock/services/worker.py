@@ -4,6 +4,8 @@ import logging
 import time
 from techrock.services.chatbot import generate_reply
 from techrock.services.messenger import send_reply
+from techrock.services.media import MediaError, prepare_media
+from techrock.services.handoff import requests_person
 
 logger = logging.getLogger("techrock")
 
@@ -28,7 +30,23 @@ async def worker(store, client, conversation_lock=None):
                 await asyncio.to_thread(store.expire, job['mid'])
                 continue
             history = await asyncio.to_thread(store.history, job['sender'])
-            reply = job['reply'] or await generate_reply(job['text'], history)
+            reply = job['reply']
+            if job.get('prepared_text'):
+                job['text'] = job['prepared_text']
+            if not reply:
+                if job.get('attachments') and not job.get('prepared_text'):
+                    try:
+                        job['text'] = await prepare_media(client, job['text'], job['attachments'])
+                        await asyncio.to_thread(store.save_prepared_text, job['mid'], job['text'])
+                    except MediaError as exc:
+                        reply = str(exc)
+                if not reply:
+                    if not await asyncio.to_thread(store.can_reply, job['mid']):
+                        continue
+                    has_images = any(item['type'] == 'image' for item in job.get('attachments') or [])
+                    # Let the model interpret images in context; quoted text in screenshots
+                    # must not be treated as a direct request from the customer.
+                    reply = None if not has_images and requests_person(job['text']) else await generate_reply(job['text'], history)
             async with lock:
                 if not await asyncio.to_thread(store.can_reply, job['mid']):
                     continue

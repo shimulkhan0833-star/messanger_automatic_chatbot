@@ -126,3 +126,12 @@ The **`pause ai` command didn’t stop the bot** for two reasons:
 After restarting the server, **`pause ai` and `resume ai` worked correctly**.
 
 Earlier, replies also stopped because the server wasn’t running. Starting it restored service; trying to start a second instance caused the **port 8000 already in use** error.
+IMAGES AND VOICE
+- main.py queues image/audio attachments as well as text.
+- job_media stores attachment URLs and cached transcripts/image observations in MySQL.
+- techrock/services/media.py downloads Meta CDN media with size and redirect limits.
+- Groq Whisper transcribes audio; Groq Qwen vision describes images.
+- The existing chatbot uses this content and conversation history to send a text answer.
+- Voice requests for a person activate manual mode; pause/resume still control media replies.
+- Model defaults use the existing GROQ_API_KEY. No additional dependencies are required.
+- Restart FastAPI after code changes; keep ngrok and webhook subscriptions running.

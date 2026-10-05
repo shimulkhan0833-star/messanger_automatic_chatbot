@@ -112,7 +112,7 @@ Do not share access tokens, API keys, or App Secrets in screenshots or logs.
 ## Behavior and limits
 
 - GET `/webhook` returns Meta's verification challenge. POST `/webhook` validates the raw-body SHA-256 signature.
-- Verified text messages for the configured Page are saved in MySQL before acknowledgement; echo, delivery/read, and attachment-only events are ignored.
+- Verified text, image, and audio messages for the configured Page are saved before acknowledgement. Page command echoes control manual mode; other echoes and delivery/read events are ignored.
 - A background worker replies and saves the last conversation turns for context. Failed jobs retry up to five times; only exception types are logged.
 - Duplicate message IDs are ignored. A crash/network timeout after Meta accepts a reply but before recording success can still cause a duplicate outgoing reply.
 - Jobs older than 23 hours expire to avoid sending delayed standard replies near the messaging-window boundary.
@@ -142,6 +142,9 @@ The server creates the new conversations and control_events tables on startup.
 Explicit human requests in English or Bangla pause the conversation without a bot
 answer. Other phrasing is classified by the AI using a structured handoff action;
 ambiguous requests may be missed. No confirmation or separate admin alert is sent.
+Handoff decisions use the latest customer message. If the AI proposes handoff with
+conversation history present, it must confirm that decision without the old history,
+so an earlier request for staff does not repeatedly pause a resumed conversation.
 Use resume ai after handling the conversation. Customer messages during manual mode
 are saved; ordinary replies typed by staff are not imported into AI history.
 
@@ -149,7 +152,48 @@ Restart the server, enable echo subscriptions, and test with an allowed Page tes
 account: pause, ask a question (silence), resume, ask a new question (reply), then
 request a person (silence until resumed). Automated tests do not contact Meta or Groq.
 
-## Automated tests
+## Images and voice messages
+
+The bot accepts Messenger image and audio attachments, with or without a text caption.
+Images are described using Groq's vision model; voice recordings are transcribed using
+Groq Whisper, then your existing chatbot generates a text reply. Bangla and English
+speech are supported by the multilingual transcription model; accuracy depends on audio quality.
+The bot sends text replies, not generated voice recordings.
+
+Defaults (optional overrides in .env):
+
+```dotenv
+GROQ_VISION_MODEL=qwen/qwen3.8-27b
+GROQ_TRANSCRIPTION_MODEL=whisper-large-v3-turbo
+```
+
+Both use your existing GROQ_API_KEY; no extra Python dependencies are needed. The vision
+model is a Groq preview model, so availability can change. See
+[Groq vision](https://console.groq.com/docs/vision) and
+[Groq speech to text](https://console.groq.com/docs/speech-to-text).
+
+Restart the server to load the changes. Startup creates job_media without altering the
+existing jobs table. It stores attachment URLs and cached transcripts/image observations.
+Media bytes are held in memory during processing and are not saved to disk. Attachment URLs
+can expire; unavailable attachments get a request to resend. Apply your data retention policy
+to job_media along with jobs/history. Media content is sent to Groq for processing.
+
+Limits: up to 3 JPEG/PNG/WebP images at 4 MiB each and 1 audio recording at 20 MiB per message.
+Audio formats: MP3, M4A, OGG, WAV, FLAC, WebM. Videos, generic file attachments, and GIFs
+are not supported. Downloads allow only HTTPS Meta CDN hosts and validate every redirect.
+Oversized, expired, unreadable, or unsupported media gets a text explanation. Transient
+provider failures follow the existing retry policy. Cached preprocessing avoids repeating
+successful vision/transcription work when sending the answer fails.
+
+Manual mode skips attachment downloads and AI calls. A spoken request for a person activates
+manual mode with no bot reply. Pause during processing stops the pending answer; resume
+still answers only new messages. Explicit text handoffs bypass media processing.
+
+To test after restart, send an image with a question, a voice message, and a spoken human
+request. Also pause a conversation, send an attachment (silence), and resume before sending
+a new attachment. Keep messages and message_echoes subscribed as before.
+
+## Run automated tests
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest -v

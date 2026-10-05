@@ -36,9 +36,13 @@ class MemoryStore:
         job = self.jobs[mid]
         return job['status'] == 'pending' and self.modes.get(job['sender'], 'auto') == 'auto'
 
-    def enqueue(self, mid, sender, text, received):
+    def enqueue(self, mid, sender, text, received, attachments=None):
         self.jobs.setdefault(mid, dict(mid=mid, sender=sender, text=text,
-            received=received, status='manual' if self.modes.get(sender) == 'manual' else 'pending', attempts=0, reply=None))
+            received=received, status='manual' if self.modes.get(sender) == 'manual' else 'pending',
+            attempts=0, reply=None, attachments=attachments))
+
+    def save_prepared_text(self, mid, text):
+        self.jobs[mid]['prepared_text'] = text
 
     def next_job(self):
         return next((j for j in self.jobs.values() if j['status']=='pending'), None)
@@ -147,6 +151,85 @@ class WebhookTests(unittest.TestCase):
         self.assertEqual(self.store.jobs['m1']['status'], 'manual')
         self.deliver(self.command('resume ai', 'inbox-resume', app_id=263902037430900))
         self.assertEqual(self.store.modes['user'], 'auto')
+
+    def test_attachment_only_and_caption_are_queued(self):
+        for kind in ('audio', 'image'):
+            self.deliver(self.event(mid=kind, text=None, attachments=[
+                {'type': kind, 'payload': {'url': 'https://lookaside.fbsbx.com/media'}}]))
+            self.assertEqual(self.store.jobs[kind]['attachments'][0]['type'], kind)
+        self.deliver(self.event(mid='caption', text='What is this?', attachments=[
+            {'type': 'image', 'payload': {'url': 'https://lookaside.fbsbx.com/photo'}}]))
+        self.assertEqual(self.store.jobs['caption']['text'], 'What is this?')
+
+    def test_unsupported_attachments_are_ignored(self):
+        self.deliver(self.event(text=None, attachments=[{'type': 'video', 'payload': {'url': 'https://example.com/video'}}]))
+        self.assertEqual(self.store.jobs, {})
+
+    def test_worker_media_handoff_pause_and_normal_reply(self):
+        async def check(mode):
+            store = MemoryStore()
+            store.enqueue('media', 'user', '', time.time(), [{'type': 'audio', 'url': 'https://lookaside.fbsbx.com/audio'}])
+            if mode == 'paused':
+                store.set_mode('user', 'manual', 'pause', time.time())
+            ready = asyncio.Event()
+            async def prepare(*args):
+                ready.set()
+                if mode == 'during':
+                    store.set_mode('user', 'manual', 'pause', time.time())
+                return 'I want to speak to a person' if mode == 'handoff' else 'Tell me about earbuds'
+            with patch('techrock.services.worker.prepare_media', side_effect=prepare) as prep, \
+                 patch('techrock.services.worker.generate_reply', new=AsyncMock(return_value='Here is some information')) as generate, \
+                 patch('techrock.services.worker.send_reply', new=AsyncMock()) as send:
+                task = asyncio.create_task(worker(store, None))
+                if mode != 'paused':
+                    await asyncio.wait_for(ready.wait(), 2)
+                await asyncio.sleep(0.05)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+                if mode == 'normal':
+                    send.assert_awaited_once()
+                    self.assertEqual(store.history('user')[0][1], 'Tell me about earbuds')
+                else:
+                    send.assert_not_awaited()
+                if mode == 'paused':
+                    prep.assert_not_called()
+                if mode == 'handoff':
+                    generate.assert_not_awaited()
+                    self.assertEqual(store.modes['user'], 'manual')
+        for mode in ('normal', 'handoff', 'paused', 'during'):
+            asyncio.run(check(mode))
+
+    def test_media_cache_reused_after_send_failure(self):
+        async def check():
+            store = MemoryStore()
+            store.enqueue('media', 'user', '', time.time(), [{'type': 'audio', 'url': 'https://lookaside.fbsbx.com/audio'}])
+            def retry(mid, attempts):
+                store.jobs[mid]['attempts'] = attempts
+                store.jobs[mid]['status'] = 'pending'
+            delivered = asyncio.Event()
+            calls = 0
+            async def send(*args):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    raise RuntimeError('Temporary failure')
+                delivered.set()
+            with patch.object(store, 'fail', side_effect=retry), \
+                 patch('techrock.services.worker.prepare_media', new=AsyncMock(return_value='Question')) as prep, \
+                 patch('techrock.services.worker.generate_reply', new=AsyncMock(return_value='Answer')) as generate, \
+                 patch('techrock.services.worker.send_reply', side_effect=send):
+                task = asyncio.create_task(worker(store, None))
+                await asyncio.wait_for(delivered.wait(), 2)
+                await asyncio.sleep(0.02)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+                prep.assert_awaited_once()
+                generate.assert_awaited_once()
+                self.assertEqual(store.jobs['media']['status'], 'done')
+                self.assertEqual(store.history('user')[0][1], 'Question')
+        asyncio.run(check())
 
     def test_handoff_silently_pauses_only_requesting_customer(self):
         self.deliver(self.event(text='I want to speak to a person'))

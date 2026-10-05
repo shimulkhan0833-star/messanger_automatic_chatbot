@@ -49,3 +49,12 @@ class StorageModeTests(unittest.TestCase):
         self.assertFalse(reopened.can_reply('one'))
         reopened.enqueue('other', 'other-user', 'Hello', 21)
         self.assertTrue(reopened.can_reply('other'))
+
+    def test_media_and_transcription_are_cached(self):
+        attachments = [{'type': 'audio', 'url': 'https://lookaside.fbsbx.com/audio'}]
+        self.store.enqueue('media', 'user', '', 21, attachments)
+        job = self.store.next_job()
+        self.assertEqual(job['attachments'], attachments)
+        self.assertIsNone(job['prepared_text'])
+        self.store.save_prepared_text('media', 'Transcribed question')
+        self.assertEqual(self.store.next_job()['prepared_text'], 'Transcribed question')
