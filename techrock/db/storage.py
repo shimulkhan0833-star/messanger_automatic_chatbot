@@ -4,7 +4,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import aliased
 from techrock.db.database import Database
-from techrock.db.models import History, Job
+from techrock.db.models import ControlEvent, Conversation, History, Job
 
 class Store:
     # Initialize database infrastructure; keep data operations in this class.
@@ -16,10 +16,42 @@ class Store:
     def enqueue(self, mid, sender, text, received):
         try:
             with self.sessions.begin() as session:
-                session.add(Job(mid=mid, sender=sender, text=text, received=received))
+                conversation = session.get(Conversation, sender)
+                manual = conversation and (conversation.mode == 'manual' or received <= conversation.changed)
+                session.add(Job(mid=mid, sender=sender, text=text, received=received,
+                                status='manual' if manual else 'pending'))
+                if manual:
+                    session.add(History(sender=sender, role='human', content=text))
         except IntegrityError as exc:
             if getattr(exc.orig, 'errno', None) != 1062:
                 raise
+
+    def set_mode(self, sender, mode, mid, received):
+        """Deduplicate controls, ignore stale commands, and retire pending replies."""
+        with self.sessions.begin() as session:
+            if session.get(ControlEvent, mid):
+                return
+            session.add(ControlEvent(mid=mid))
+            conversation = session.get(Conversation, sender)
+            if conversation is None:
+                conversation = Conversation(sender=sender, mode='auto', changed=0)
+                session.add(conversation)
+            if received < conversation.changed:
+                return
+            conversation.mode, conversation.changed = mode, received
+            if mode == 'manual':
+                pending = session.scalars(select(Job).where(Job.sender == sender, Job.status == 'pending')).all()
+                for job in pending:
+                    job.status = 'manual'
+                    session.add(History(sender=sender, role='human', content=job.text))
+
+    def can_reply(self, mid):
+        with self.sessions() as session:
+            job = session.scalar(select(Job).where(Job.mid == mid))
+            if job is None or job.status != 'pending':
+                return False
+            conversation = session.get(Conversation, job.sender)
+            return conversation is None or conversation.mode == 'auto'
 
     # Select a ready message in each sender's arrival order; return data independent of the session.
     def next_job(self):
@@ -59,7 +91,7 @@ class Store:
     # Schedule a delayed retry; permanently fail the job after five attempts.
     def fail(self, mid, attempts):
         with self.sessions.begin() as session:
-            session.execute(update(Job).where(Job.mid == mid).values(attempts=attempts,
+            session.execute(update(Job).where(Job.mid == mid, Job.status == 'pending').values(attempts=attempts,
                 status='failed' if attempts >= 5 else 'pending',
                 next_try=time.time() + min(2 ** attempts * 5, 300)))
 

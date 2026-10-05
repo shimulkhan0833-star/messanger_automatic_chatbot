@@ -117,11 +117,39 @@ Do not share access tokens, API keys, or App Secrets in screenshots or logs.
 - Duplicate message IDs are ignored. A crash/network timeout after Meta accepts a reply but before recording success can still cause a duplicate outgoing reply.
 - Jobs older than 23 hours expire to avoid sending delayed standard replies near the messaging-window boundary.
 - Edit `knowledge.txt` with verified Page information. No live news/search or automatic post import is included. Bangla and English replies are supported by the prompt.
-- Human handoff is not implemented; the bot never claims to notify an admin.
+- Per-customer manual mode is persistent. Human requests pause replies silently; no admin notification service is included.
 - Run **one server process/worker**, with a persistent MySQL database. Do not use multiple Uvicorn workers; the queue is designed for a single worker. Production scaling needs a shared queue and coordinated consumers.
 - Conversation history and jobs are stored in the MySQL database `tech_rock_chatbot`. Add a retention/deletion policy before larger deployment. Failed jobs can be inspected in MySQL; there is no admin retry dashboard.
 
-## Tests
+## Manual conversations
+
+Enable `message_echoes` alongside `messages` in Meta's webhook subscriptions.
+Send exactly `pause ai` from your Page inbox in the customer's conversation to
+pause replies for that customer. Send `resume ai` when finished. Commands ignore
+case and extra whitespace; customers can see them as ordinary messages.
+Only Page-originated echoes without metadata and with no app_id or an explicitly
+allowed inbox app_id are accepted as controls. META_MANUAL_REPLY_APP_IDS is a
+comma-separated allowlist, defaulting to 263902037430900, the inbox app ID observed
+on this Page's signed command echoes. Never add the chatbot's own Meta app ID.
+Test the actual inbox you use, since other Page tools may use different app IDs.
+See [Meta's sample echo handler](https://github.com/fbsamples/messenger-platform-samples/blob/main/node/app.js).
+
+Pausing retires pending replies, including answers being generated. Resuming answers
+new messages only. A send already in progress cannot be recalled. Duplicate commands
+are ignored, and older commands cannot override newer ones. Modes survive restarts.
+The server creates the new conversations and control_events tables on startup.
+
+Explicit human requests in English or Bangla pause the conversation without a bot
+answer. Other phrasing is classified by the AI using a structured handoff action;
+ambiguous requests may be missed. No confirmation or separate admin alert is sent.
+Use resume ai after handling the conversation. Customer messages during manual mode
+are saved; ordinary replies typed by staff are not imported into AI history.
+
+Restart the server, enable echo subscriptions, and test with an allowed Page test
+account: pause, ask a question (silence), resume, ask a new question (reply), then
+request a person (silence until resumed). Automated tests do not contact Meta or Groq.
+
+## Automated tests
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest -v

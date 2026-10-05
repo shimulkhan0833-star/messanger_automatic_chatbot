@@ -14,6 +14,7 @@ from fastapi.responses import PlainTextResponse
 import techrock.config
 from techrock.db.storage import Store
 from techrock.services.worker import worker
+from techrock.services.handoff import requests_person
 
 
 # Build the FastAPI application, register its routes, and configure startup/shutdown handling.
@@ -25,8 +26,9 @@ def create_app(store_factory=None, run_worker=True):
     async def lifespan(app):
         store = await asyncio.to_thread(store_factory or Store)
         app.state.store = store
+        app.state.conversation_lock = asyncio.Lock()
         async with httpx.AsyncClient(timeout=20) as client:
-            task = asyncio.create_task(worker(store, client)) if run_worker else None
+            task = asyncio.create_task(worker(store, client, app.state.conversation_lock)) if run_worker else None
             try:
                 yield
             finally:
@@ -66,6 +68,9 @@ def create_app(store_factory=None, run_worker=True):
     async def receive(request: Request):
         secret = os.getenv('META_APP_SECRET', '')
         page = os.getenv('META_PAGE_ID', '')
+        # This Page inbox app ID was observed on signed manual command echoes.
+        manual_apps = {value.strip() for value in os.getenv(
+            'META_MANUAL_REPLY_APP_IDS', '263902037430900').split(',') if value.strip()}
         if not secret or not page:
             raise HTTPException(503, 'Meta app secret and Page ID are required')
         raw = await request.body()
@@ -85,17 +90,35 @@ def create_app(store_factory=None, run_worker=True):
                 for event in entry.get('messaging', []):
                     message = event.get('message', {})
                     sender = event.get('sender', {}).get('id')
+                    recipient = event.get('recipient', {}).get('id')
+                    mid, text = message.get('mid'), message.get('text')
+                    received = min(float(event.get('timestamp', time.time() * 1000)) / 1000, time.time())
+                    if (message.get('is_echo') and str(sender) == page and recipient and str(recipient) != page
+                        and (not message.get('app_id') or str(message['app_id']) in manual_apps)
+                        and not message.get('metadata')
+                        and isinstance(mid, str) and isinstance(text, str)):
+                        command = ' '.join(text.casefold().split())
+                        if command in ('pause ai', 'resume ai'):
+                            events.append(('control', str(recipient), 'manual' if command == 'pause ai' else 'auto', mid, received))
+                        continue
                     if (message.get('is_echo') or not sender or str(sender) == page or
                         str(event.get('recipient', {}).get('id')) != page):
                         continue
                     mid, text = message.get('mid'), message.get('text')
                     if isinstance(mid, str) and isinstance(text, str) and text.strip():
-                        received = min(float(event.get('timestamp', time.time() * 1000)) / 1000, time.time())
-                        events.append((mid, str(sender), text, received))
+                        events.append(('message', mid, str(sender), text, received))
         except (ValueError, TypeError, AttributeError):
             raise HTTPException(400, 'Invalid event payload') from None
         for event in events:
-            await asyncio.to_thread(request.app.state.store.enqueue, *event)
+            async with request.app.state.conversation_lock:
+                if event[0] == 'control':
+                    await asyncio.to_thread(request.app.state.store.set_mode, *event[1:])
+                else:
+                    _, mid, sender, text, received = event
+                    await asyncio.to_thread(request.app.state.store.enqueue, mid, sender, text, received)
+                    if requests_person(text):
+                        await asyncio.to_thread(request.app.state.store.set_mode, sender, 'manual',
+                                                'handoff:' + mid, received)
         return 'EVENT_RECEIVED'
 
     return app

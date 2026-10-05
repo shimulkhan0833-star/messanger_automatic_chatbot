@@ -19,10 +19,26 @@ class MemoryStore:
     def __init__(self):
         self.jobs = {}
         self.messages = {}
+        self.modes = {}
+        self.controls = set()
+
+    def set_mode(self, sender, mode, mid, received):
+        if mid in self.controls:
+            return
+        self.controls.add(mid)
+        self.modes[sender] = mode
+        if mode == 'manual':
+            for job in self.jobs.values():
+                if job['sender'] == sender and job['status'] == 'pending':
+                    job['status'] = 'manual'
+
+    def can_reply(self, mid):
+        job = self.jobs[mid]
+        return job['status'] == 'pending' and self.modes.get(job['sender'], 'auto') == 'auto'
 
     def enqueue(self, mid, sender, text, received):
         self.jobs.setdefault(mid, dict(mid=mid, sender=sender, text=text,
-            received=received, status='pending', attempts=0, reply=None))
+            received=received, status='manual' if self.modes.get(sender) == 'manual' else 'pending', attempts=0, reply=None))
 
     def next_job(self):
         return next((j for j in self.jobs.values() if j['status']=='pending'), None)
@@ -95,6 +111,75 @@ class WebhookTests(unittest.TestCase):
 
     def test_malformed_signed_payload(self):
         self.assertEqual(self.post({'object': 'page', 'entry': 'bad'}).status_code, 400)
+
+    def deliver(self, event):
+        return self.post({'object': 'page', 'entry': [{'id': 'page', 'messaging': [event]}]})
+
+    def command(self, text, mid, **extra):
+        event = self.event(text=text, mid=mid, is_echo=True, **extra)
+        event['sender'], event['recipient'] = {'id': 'page'}, {'id': 'user'}
+        return event
+
+    def test_pause_resume_and_duplicate_command(self):
+        self.deliver(self.event())
+        pause = self.command(' PAUSE AI ', 'pause')
+        self.assertEqual(self.deliver(pause).status_code, 200)
+        self.assertEqual(self.store.jobs['m1']['status'], 'manual')
+        self.deliver(self.event(mid='m2'))
+        self.assertEqual(self.store.jobs['m2']['status'], 'manual')
+        self.deliver(self.command('resume ai', 'resume'))
+        self.deliver(pause)
+        self.deliver(self.event(mid='m3'))
+        self.assertEqual(self.store.jobs['m3']['status'], 'pending')
+        self.assertEqual(self.store.jobs['m1']['status'], 'manual')
+
+    def test_customer_cannot_resume_and_bot_commands_ignored(self):
+        self.deliver(self.command('pause ai', 'pause'))
+        self.deliver(self.event(mid='customer', text='resume ai'))
+        self.deliver(self.command('resume ai', 'bot', app_id='123'))
+        self.deliver(self.command('resume ai', 'metadata', metadata='bot'))
+        self.assertEqual(self.store.modes['user'], 'manual')
+
+    def test_page_inbox_app_commands_accepted(self):
+        self.deliver(self.event())
+        self.deliver(self.command('pause ai', 'inbox-pause', app_id=263902037430900))
+        self.assertEqual(self.store.modes['user'], 'manual')
+        self.assertEqual(self.store.jobs['m1']['status'], 'manual')
+        self.deliver(self.command('resume ai', 'inbox-resume', app_id=263902037430900))
+        self.assertEqual(self.store.modes['user'], 'auto')
+
+    def test_handoff_silently_pauses_only_requesting_customer(self):
+        self.deliver(self.event(text='I want to speak to a person'))
+        self.assertEqual(self.store.modes['user'], 'manual')
+        self.assertEqual(self.store.jobs['m1']['status'], 'manual')
+        other = self.event(mid='other')
+        other['sender']['id'] = 'other-user'
+        self.deliver(other)
+        self.assertEqual(self.store.jobs['other']['status'], 'pending')
+
+    def test_worker_handoff_and_pause_during_generation(self):
+        async def check(handoff):
+            store = MemoryStore()
+            store.enqueue('m1', 'user', 'Help', time.time())
+            finished = asyncio.Event()
+            async def generate(*args):
+                if not handoff:
+                    store.set_mode('user', 'manual', 'pause', time.time())
+                    store.set_mode('user', 'auto', 'resume', time.time())
+                finished.set()
+                return None if handoff else 'Answer'
+            with patch('techrock.services.worker.generate_reply', side_effect=generate), \
+                 patch('techrock.services.worker.send_reply', new=AsyncMock()) as send:
+                task = asyncio.create_task(worker(store, None))
+                await asyncio.wait_for(finished.wait(), 2)
+                await asyncio.sleep(0.05)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+                send.assert_not_awaited()
+                self.assertEqual(store.jobs['m1']['status'], 'manual')
+        asyncio.run(check(True))
+        asyncio.run(check(False))
 
     def test_worker_reply_and_memory(self):
         async def check():

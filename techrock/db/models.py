@@ -6,6 +6,16 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 class Base(DeclarativeBase):
     pass
 
+class Conversation(Base):
+    __tablename__ = 'conversations'
+    sender: Mapped[str] = mapped_column(String(128), primary_key=True)
+    mode: Mapped[str] = mapped_column(String(16), default='auto')
+    changed: Mapped[float] = mapped_column(DOUBLE(asdecimal=False), default=0)
+
+class ControlEvent(Base):
+    __tablename__ = 'control_events'
+    mid: Mapped[str] = mapped_column(VARCHAR(600, charset='ascii', collation='ascii_bin'), primary_key=True)
+
 class Job(Base):
     __tablename__ = 'jobs'
     __table_args__ = (Index('queue_lookup', 'status', 'next_try'), Index('sender_order', 'sender', 'status', 'id'), {'mysql_engine': 'InnoDB', 'mysql_charset': 'utf8mb4'})

@@ -70,24 +70,59 @@ Describes the message workflow and each project's file responsibilities.
 
 ****************************************************************************************
 
-| File             | Function                   | Purpose |
-|---|---|---|
-| `database.py` | `Database.__init__()` | Creates database/tables, engine, and sessions. |
-| `database.py` | `close()` | Closes pooled database connections. |
-| `storage.py` | `Store.__init__()` | Connects storage to the database setup. |
-| `storage.py` | `enqueue()` | Saves incoming messages; ignores duplicates. |
-| `storage.py` | `next_job()` | Gets the next message ready to process. |
-| `storage.py` | `history()` | Loads recent conversation messages. |
-| `storage.py` | `save_reply()` | Saves the generated reply for retries. |
-| `storage.py` | `complete()` | Marks the job done and saves conversation history. |
-| `storage.py` | `expire()` | Stops processing an old message. |
-| `storage.py` | `fail()` | Schedules retries or marks the job failed. |
-| `storage.py` | `close()` | Calls database cleanup. |
-| `chatbot.py` | `generate_reply()` | Generates a Groq reply using knowledge and history. |
-| `messenger.py` | `send_reply()` | Sends the reply through Meta’s API. |
-| `worker.py` | `worker()` | Processes queued messages and handles retries. |
-| `main.py` | `create_app()` | Builds the FastAPI app and routes. |
-| `main.py` | `lifespan()` | Starts and stops app resources. |
-| `main.py` | `health()` | Reports missing configuration. |
-| `main.py` | `verify()` | Verifies the webhook with Meta. |
-| `main.py` | `receive()` | Validates and queues incoming messages. |
+Suppose someone messages The Tech Rock: **“Do you know about earbuds?”**
+
+1. **Customer → Meta**  
+   Messenger sends the customer’s message to Meta’s servers.
+
+2. **Meta → ngrok**  
+   Meta forwards a message event to the public webhook URL you configured. ngrok passes it to your local server on port `8000`.
+
+3. **ngrok → `POST /webhook`**  
+   The route in `main.py` checks that the request came from Meta and belongs to The Tech Rock. It extracts the message and sender’s ID.
+
+4. **→ MySQL jobs queue**  
+   The message is saved in the `jobs` table with status `pending`. The webhook returns HTTP `200` to tell Meta it received the event.
+
+5. **→ Worker**  
+   The background worker picks up the pending message for processing.
+
+6. **Knowledge + history → Groq**  
+   The chatbot combines:
+   
+   - `knowledge.txt`: information about The Tech Rock.
+   - Conversation history: recent messages from that customer.
+   - The new question: “Do you know about earbuds?”
+
+   LangChain builds the prompt, and Groq generates an answer.
+
+7. **→ Messenger Send API**  
+   `messenger.py` sends that answer and the customer’s sender ID to Meta, authenticated with your Page access token.
+
+8. **→ Customer**  
+   Meta displays the answer in the customer’s Messenger conversation. The worker marks the job `done` and saves the conversation history.
+
+**ngrok handles incoming requests.** Your server sends outgoing replies directly to Meta’s API.
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+MANUAL MODE
+- Page admin sends pause ai in the customer's Page inbox conversation.
+- A signed message echo sets their MySQL conversation mode to manual and retires pending replies.
+- Incoming messages remain stored, but the bot stays silent.
+- Page admin sends resume ai; only new incoming messages get automatic replies.
+- Customer requests to speak to a person also activate manual mode with no AI answer.
+- Subscribe to both messages and message_echoes; the commands are visible to the customer.
+- New tables: conversations (persistent mode), control_events (duplicate command protection).
+- techrock/services/handoff.py detects common explicit human requests; chatbot.py handles other wording.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+The **`pause ai` command didn’t stop the bot** for two reasons:
+
+1. **Page message echoes weren’t fully subscribed.** Customer messages reached the server, but your manual commands didn’t. Enabling `message_echoes` in both the app and Page subscriptions fixed delivery.
+2. **The code rejected your Page inbox’s app ID.** Once commands arrived, the server still ignored them. We updated the filter to accept your inbox’s commands while ignoring the bot’s own replies.
+
+After restarting the server, **`pause ai` and `resume ai` worked correctly**.
+
+Earlier, replies also stopped because the server wasn’t running. Starting it restored service; trying to start a second instance caused the **port 8000 already in use** error.
